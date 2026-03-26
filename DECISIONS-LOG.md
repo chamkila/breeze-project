@@ -11,7 +11,7 @@
 **Over:** Using libssh2 (BSD, working) or libssh (LGPL) or NIOSSH (Swift)
 **Why:** Zero dependencies = smaller attack surface. Full control over pipelining, adaptive chunking, BBR. No license complications (libssh is LGPL). Can optimize for exact Breeze use case. Cross-platform (C runs everywhere). libssh2 was working but limited — no async pipelining by design, hidden accidental pipelining only
 **Risk accepted:** Massive engineering effort. Every crypto bug is ours to fix
-**Status:** Validated. libbrz connects, transfers, 651 tests
+**Status:** Validated. libbrz connects, transfers, 660 tests
 
 ### AD-002: BreezeEngineOnly=true (disable OpenSSH fallback)
 **When:** Session 43e (Thread 5)
@@ -26,8 +26,8 @@
 **Chose:** Direct ARM NEON intrinsics (vaeseq_u8, vaesmcq_u8, vmull_p64)
 **Over:** Apple's CommonCrypto (CCCryptorCreateWithMode) which uses hardware internally
 **Why:** Dennis Ritchie way — understand every instruction. CommonCrypto is a black box. NEON intrinsics give full control, visibility into every operation, cross-platform ARM64 (not macOS-only). Zero dependencies principle
-**Risk accepted:** Must get AESE round key schedule exactly right (session 43 got it wrong). CommonCrypto would "just work" but violates the zero-dependency philosophy
-**Status:** Pending — session 44
+**Risk accepted:** Must get AESE round key schedule exactly right (session 43 got it wrong, session 44 fixed it)
+**Status:** DONE. NEON AES-256-CTR at 600 MB/s on Apple Silicon. 9 gatekeeper tests passing
 
 ### AD-004: BTP signaling/bearer separation (SS7 model)
 **When:** Sessions in Thread 3
@@ -35,7 +35,7 @@
 **Over:** Single-connection multiplexing like all competitors
 **Why:** Browsing should NEVER stall because a transfer is saturating the pipe. SS7 solved this in the 1970s — control plane and data plane on separate links. Real-world benefit: user browses files while 1GB upload runs in background
 **Risk accepted:** More SSH connections = more handshake overhead. Mitigated by connection pool with CAS borrow/return
-**Status:** Working. Each BTPLink.open() creates a NEW SSH connection
+**Status:** Architecture CORRECT. Implementation needs AD-013 fix (see below)
 
 ### AD-005: SwiftData over CoreData/SQLite/UserDefaults for persistence
 **When:** Session 1-2 (Thread 1)
@@ -94,6 +94,54 @@
 **Why:** Inspired by Swift Student Challenge winners (FocusFish, Hanafuda). The emotional connection IS the product. "Every line of code must serve the mesmerizing, blissful, joy to work with standard." These features are what make people stop scrolling on the website
 **Status:** Designed, not built. Must ship with M1/M2, not deferred to M4
 
+### AD-013: Adaptive connection count — NEVER one-per-file, NEVER hardcoded single
+**When:** Session 44 (Thread 5) — after benchmark revealed 24 SSH connections for 283 files
+**Chose:** libbrz calculates optimal connection count from payload characteristics and network measurement
+**Over (rejected option A):** One SSH connection per file (what Claude Code implemented — WRONG, never asked for, 24 connections for 283 files wastes 12+ seconds in handshakes)
+**Over (rejected option B):** Hardcoded single SSH connection for everything (too rigid — a 50 GB file on a high-BDP link benefits from 2-4 parallel streams)
+**Why:** The number of connections is a function of math, not a fixed constant:
+
+```
+Inputs to the decision:
+  - Total payload size (bytes)
+  - Number of files and their size distribution
+  - Measured wire rate (from BBR engine)
+  - Measured RTT (from brz_probe)
+  - BDP = wire_rate × RTT
+  - Server's max concurrent sessions (from SSH channel limits)
+  - CPU cores available (no point in more crypto threads than cores)
+
+Rules:
+  1. Start with 1 bearer connection. One pitcher.
+  2. If payload > BDP × pipeline_depth, one pipe can't fill the link.
+     Add connections until: N_connections × pipe_throughput ≥ wire_rate
+  3. Never exceed server's MaxSessions or CPU cores
+  4. Small files (< 1 MB avg): ALWAYS 1 connection + brz_mput batch.
+     Per-file handshake cost dominates — batching is the win.
+  5. Large files (> 100 MB): consider parallel chunks on 2-4 connections.
+     The data volume justifies the handshake cost.
+  6. Mixed payload: 1 connection for the small files (batch),
+     optionally additional connections for the large files (parallel chunks)
+```
+
+The milk pitcher analogy (j's): "if there is 10 kg of milk, a 100g pitcher is stupid. Get a 500g pitcher and make two trips and pour both simultaneously." The pitcher size and count depends on the load, not on the number of glasses to fill.
+
+**Key principle:** The signaling/bearer separation (AD-004) stays — browsing never waits for transfers. But bearer connections are created based on payload math, not per-file. One bearer handles hundreds of small files through brz_mput. Multiple bearers only when the math says one pipe can't carry the load fast enough.
+
+**Implementation:**
+- `brz_mput(handle, entries[], count, progress)` — batch upload on one SFTP session, no new connections
+- `brz_transfer_plan(payload_info, network_profile) → plan` — returns optimal connection count + chunking strategy
+- Breeze calls brz_transfer_plan before starting, then executes the plan
+- The plan is pure math in libbrz — Breeze doesn't make connection decisions
+
+**Benchmark evidence:**
+- Breeze (24 connections): ~200 seconds for 869 MB
+- OpenSSH sftp (1 connection, 64 pipelined): 169 seconds
+- rsync (1 connection, compression, 3-process pipeline): 84 seconds
+- 23 unnecessary SSH handshakes cost 12+ seconds of pure waste
+
+**Status:** DECIDED. brz_mput is next session priority. Transfer plan API follows.
+
 ---
 
 ## Technical Decisions (libbrz)
@@ -113,15 +161,19 @@
 ### TD-005: Cipher preference order (runtime, not compile-time)
 **Why:** _rank_ciphers scores each cipher by security×performance considering hardware availability. On Apple Silicon with NEON: GCM > CTR. On software-only: CTR > GCM. Cipher failure API (brz_exclude_cipher) removes known-bad ciphers per-server. No static preference list that works for all cases
 
+### TD-006: Adaptive connection count for transfers (not hardcoded)
+**When:** Session 44 (decided jointly with AD-013)
+**Why:** Connection count is a computed value from payload + network measurement, not a constant. The BBR engine already adapts chunk size and pipeline depth — connection count is the same principle applied one level up. See AD-013 for the full formula and rules.
+
 ---
 
 ## Decisions NOT YET Made (open questions for future sessions)
 
 - **chacha20-poly1305 send bug:** Root cause unknown despite exhaustive investigation. May need packet capture comparison with OpenSSH
-- **One-handle architecture:** BTP should share SFTPDataSource's brz_t* handle instead of creating separate connections per bearer. Design not finalized
 - **OpenSSH fallback for release:** Re-enable for beta testing? Or ship libbrz-only and fix failures as they come?
 - **QUIC transport (J-59):** Parked. No IETF draft for SSH-over-QUIC. Research when one appears
 - **Test count recovery:** Peak was 1530, current ~503 after transport refactoring. Decide: restore old tests that still apply, or rewrite for current architecture?
+- **SSH compression algorithm:** zlib vs zstd vs none — needs benchmarking on mixed payloads. zlib is standard (RFC 4253), zstd is faster but non-standard
 
 ---
 

@@ -1,5 +1,5 @@
 # Breeze — Complete Project Checkpoint v2
-**Updated:** 2026-03-26 | **Covers:** All sessions (1–44) across all conversation threads
+**Updated:** 2026-03-26 | **Covers:** All sessions (1–44, updated after S44 results) across all conversation threads
 **Purpose:** Single document to resume any thread with full context. Paste into project knowledge or hand to a new session.
 
 ---
@@ -40,208 +40,124 @@ Layer 1: PHYSICAL        Transport backends + TCP sockets
 
 **Key rule:** Signaling link (browsing) is a SEPARATE TCP connection from bearer links (transfers). Signaling NEVER waits for bearer. Each BTPLink.open() creates a NEW SSH connection. No layer above Layer 1 touches crypto. No layer above Layer 2 touches sockets.
 
-BTP was designed by studying actual SS7 source code (OpenSS7 mtp3.cpp state machines, Extended-jSS7 M3UA As.java application server pattern). Five Swift files implement it: BTPServiceIndicator, BTPState, BTPLink, BTPLinkManager, BTPTransferRequest. The BTPServiceIndicator routes messages by priority (management > signaling > interactive > bearer > bulk), mirroring SS7's SI field.
-
 ### FRAME Pattern — Thin Jacket Architecture
 
-Intelligence lives in Core and Plugins. Each layer independently updatable. Inspired by the MDS elmgr/datamgr jacket pattern where the same binary reads different config sections to become different processing pipelines.
+Intelligence lives in Core and Plugins. Each layer independently updatable. Inspired by the MDS elmgr/datamgr jacket pattern.
 
-### Transport Backends (priority order)
+### Transport Backends
 
 1. **BrzTransport** (pri: 300) — libbrz.a static library, PRIMARY AND ACTIVE
-2. **OpenSSHTransport** (pri: 10) — Process-based fallback, DISABLED (BreezeEngineOnly=true)
-3. **LibSSH2Transport** (pri: 100) — STUBBED OUT without permission (J-40, needs restore from git)
-4. **LibSSHTransport** — STUBBED OUT without permission (needs restore from git)
-5. **FTPTransport** (pri: 80) — URLSession-based, filtered out for SFTP connections
-
-**Current state:** BreezeEngineOnly=true. All connections go through libbrz. OpenSSH fallback is disabled.
+2. **OpenSSHTransport** (pri: 10) — DISABLED (BreezeEngineOnly=true)
+3. **LibSSH2Transport** (pri: 100) — STUBBED OUT without permission (J-40)
+4. **FTPTransport** (pri: 80) — URLSession-based, filtered out for SFTP
 
 ### TransferHandler Architecture (THE BREAKTHROUGH — Session 29)
 
-**Root cause found:** SwiftUI structs are recreated constantly. Closures captured on structs become stale. Drag-drop events fire from AppKit AFTER SwiftUI recreates the struct → closure points to dead copy.
-
-**Solution:** `TransferHandler` is an `@Observable @MainActor final class` (reference type). All access goes to the same live object.
-
-**Rule:** ALL transfer callbacks use TransferHandler. Never use struct closure callbacks for transfers again.
+SwiftUI struct recreation makes closures stale. Fix: `TransferHandler` as `@Observable @MainActor final class`. ALL transfer callbacks use this. Never struct closures again.
 
 ---
 
 ## libbrz — THE SSH/SFTP ENGINE
 
-### What Is libbrz
-
-A pure C11 SSH/SFTP client library with zero external dependencies. Built by studying public-domain crypto primitives from tinyssh, dropbear, and openssh-portable — concepts and algorithms only, no code copied.
+Pure C11 SSH/SFTP library. Zero external dependencies. Crypto vendored from public-domain sources.
 
 ### Evolution Timeline
 
 | Session | Version | Milestone |
 |---------|---------|-----------|
-| ~30 | v0.3.0-ssh | Initial scaffolding: SSH packet framing, crypto primitives vendored, 249 tests |
-| ~34 | v1.0.0 | **FIRST COMPLETE SFTP CONNECTION** — curve25519-sha256, aes256-ctr, RSA agent auth, SFTP v3. 607 tests |
-| 35 | v0.4.2 | Connection pool (CAS borrow/return), folder upload fix (brz_mkdir_p), error code collision fix |
-| 41 | v0.4.3 | BBR-inspired adaptive transfer engine, server profile cache, brz_probe() API |
-| 41c | — | tune.c/tune.h extracted and tested. 646 tests |
-| 43e | — | AES-256-GCM end-to-end working, atomic sftp_send_packet, cipher failure API. 651 tests |
+| ~30 | v0.3.0-ssh | Initial scaffolding, 249 tests |
+| ~34 | v1.0.0 | **FIRST SFTP CONNECTION** — curve25519-sha256, aes256-ctr, RSA agent auth. 607 tests |
+| 35 | v0.4.2 | Connection pool, folder upload fix, error code collision fix |
+| 41 | v0.4.3 | BBR adaptive engine, server profile cache, brz_probe() |
+| 43e | — | AES-256-GCM working, atomic sftp_send_packet, cipher failure API. 651 tests |
+| 44 | — | NEON AES-256 hw accel re-enabled (600 MB/s CTR). Breeze UI fixes. 660 tests |
 
-### Current State (Session 43e)
+### Current State (Session 44)
 
-- **Tests:** 651, 0 warnings, 0 external dependencies
-- **Working ciphers:** aes256-ctr + hmac-sha2-256, aes-256-gcm (software)
-- **Broken ciphers:** chacha20-poly1305 send path (recv works — parked after exhaustive investigation)
-- **KEX:** curve25519-sha256 only (no unimplemented algorithms offered)
+- **Tests:** 660, 0 warnings, 0 external dependencies
+- **Working ciphers:** aes256-ctr + hmac-sha2-256, aes-256-gcm (software GHASH)
+- **Broken ciphers:** chacha20-poly1305 send path (parked)
+- **KEX:** curve25519-sha256 only
 - **Auth:** RSA via ssh-agent (rsa-sha2-256), Ed25519 pubkey from file
 - **SFTP:** v3, brz_ls, brz_put (pipelined), brz_get, brz_mkdir, brz_mkdir_p
-- **Adaptive engine:** BBR-inspired 4-phase (STARTUP/DRAIN/PROBE_BW/PROBE_RTT), BDP-based chunk/depth
+- **Adaptive engine:** BBR 4-phase (STARTUP/DRAIN/PROBE_BW/PROBE_RTT), BDP-based
 - **Connection pool:** CAS borrow/return, signaling/bearer separation, maintenance thread
-- **Status bar shows:** `implicit · AES-256-GCM · via libbrz · BTP`
 
 ### Performance State
 
-- **Current:** ~1.4 MB/s for large folders (dmp/, 283 files, 1.05 GB)
-- **Software GCM:** 41.8s for dmp/ | **Software CTR:** 26s for dmp/
+- **AES-256-CTR:** ~600 MB/s on Apple Silicon (NEON hw) — WORKING
+- **AES-256-GCM:** ~17 MB/s (software GHASH bottleneck) — NEON PMULL is NEXT PRIORITY
+- **End-to-end transfer:** ~1.4 MB/s for large folders (per-file SSH overhead)
 - **Target:** 20+ MB/s LAN (beat FileZilla's 13 MB/s)
-- **NEON hw acceleration:** Attempted S43, disabled — AESE round key mismatch. NEXT PRIORITY
 - **Known bottleneck:** Per-file SSH connection overhead. One-handle architecture needed
 
 ### Architecture Rules (NON-NEGOTIABLE)
 
-- ALL intelligence in libbrz. Breeze/CLI/REST are thin jackets
-- No hardcoded values — BBR model measures and adapts
-- Pure C11. brz_ prefix. Zero external dependencies
-- Software fallback for everything — never platform-lock
+ALL intelligence in libbrz. Pure C11. brz_ prefix. Zero deps. Software fallback always exists.
 
-### Implementation Roadmap (Docs/Implementation-Roadmap.md, J-62)
+### Implementation Roadmap (J-62)
 
-Phase 0: Transfers work (DONE) → Phase 1: SFTP extensions → Phase 2: Resume, parallel → Phase 3: Sync, tree ops → Phase 4: BreezeCLI/REST → Phase 5: Encryption, jump hosts. Every feature ships in 3 channels: libbrz, Breeze.app, BreezeCLI/REST.
+Phase 0 (DONE) → Phase 1: SFTP extensions → Phase 2: Resume, parallel → Phase 3: Sync → Phase 4: CLI/REST → Phase 5: Encryption, jump hosts
 
 ---
 
 ## BREEZE.APP — CURRENT STATE
 
-### What Works (Verified by Human QA)
+### What Works
 
-SFTP connection/browsing via libbrz, directory navigation with breadcrumbs, file browser (sizes/permissions/dates), SSH config auto-import (24 hosts), SSH Key viewer, connection form, Cmd+K palette, single-pane + local drawer (Cmd+L), density modes (Cmd+1/2/3), transcript drawer, 5 themes (Breeze/Midnight/Dusk/Forest/Mono), context menus, about window, DMG packaging, upload (toolbar + drag-drop), download (drag-drop), delete, new folder (recursive), Quick Look, transfer celebration sound, shimmer animation, BTP signaling/bearer, folder upload (283 files verified).
+SFTP via libbrz, navigation, file browser, SSH config import (24 hosts), SSH Key viewer, connection form, Cmd+K palette, single-pane + local drawer, density modes, transcript, 5 themes, context menus, DMG packaging, upload (toolbar + drag-drop), download (drag-drop), delete, new folder (recursive), Quick Look, transfer celebration, shimmer, BTP, folder upload (283 files verified).
 
-### Open UI Bugs (prioritized)
+### Open UI Bugs
 
-1. Sidebar click unresponsive — gesture conflict or invisible overlay
-2. Transfer progress "Zero KB/s" — speed hardcoded to 0
-3. File list doesn't auto-scroll on directory change
-4. File icons generic — all same icon regardless of type
+1. ~~Sidebar click unresponsive~~ — FIXED S44 (.simultaneousGesture)
+2. ~~Transfer progress "Zero KB/s"~~ — FIXED S44 (fallback calc)
+3. ~~File list doesn't auto-scroll~~ — FIXED S44 (.id(currentPath))
+4. ~~File icons generic~~ — FIXED S44 (30+ extensions → SF Symbols)
 5. Sidebar text contrast too low (partially fixed — vibrancy override)
 6. "Drifting to..." loading full-screen takeover
 7. Settings button not wired on welcome screen
-
-### Build Sessions Summary
-
-| Sessions | Tests After | Highlights |
-|----------|-------------|------------|
-| 1 | ~40 | Xcode project, SwiftUI shell, libssh2 plugin |
-| 2-3 | 114 | Refactor, SessionPool, TransferQueue, FTP plugin, robustness |
-| 4-7 | ~427 | Multiplexer, NetworkProbe, transfers, search, key gen, profiles |
-| 8-9 | ~1052 | BreezeVault, SSHFS, prefetch, archive VFS, smart queries |
-| 10-12 | 1530 | BTP wired, keyboard ops, pipelining, error handling |
-| 13+ | 503+ | Bug bash, transport refactoring (test count decreased during major changes) |
 
 ---
 
 ## CRITICAL RULES
 
-### Engineering (NON-NEGOTIABLE — all projects, all chats)
-
-- **Dennis Ritchie way:** Fix root causes. No shortcuts, workarounds, or stubs. Buy once, cry once
-- **"In love code"** — meticulous, passionate, crafted. Not "good enough"
-- **Never normalize bugs** in new code
-
-### Code (enforced via CLAUDE.md)
-
+- **Dennis Ritchie way:** Fix root causes. No shortcuts, stubs, or workarounds
+- **"In love code"** — meticulous, passionate, crafted
 - NEVER remove/stub working code without discussion
-- ALL transfer callbacks use TransferHandler @Observable class
-- ALL Process() calls in Task.detached — NEVER on main thread
-- BreezeColors for ALL colors. os.Logger not print(). No force unwraps except tests
+- ALL Process() calls in Task.detached. BreezeColors for ALL colors. os.Logger not print()
 - Build and test after EVERY task. Test count NEVER decreases
-
-### GUI Quality Gates (Docs/Design-Principles.md — MANDATORY)
-
-1. Depth (glass/blur) 2. Restraint (minimal color) 3. Typography hierarchy 4. Intentional negative space 5. Meaningful motion
-
-### Product
-
-- UI is #1 priority. "Touch water, it ripples" — minimum gesture, maximum result
-- Don't reinvent Apple's tools — orchestrate them
-- Apple frameworks as foundation. Never depend on competitor's library
-- Keychain for ALL credential storage
+- GUI: Depth, Restraint, Typography hierarchy, Negative space, Meaningful motion
+- UI is #1 priority. Apple frameworks as foundation. Keychain for ALL credentials
 
 ---
 
 ## PRODUCT VISION
 
-### Business Model (Sublime Text approach)
-
-$14.99 one-time. Students free. Fully functional forever, gentle reminder after 30 days. Registration key intentionally crackable. Direct DMG + Homebrew Cask.
-
-### Joy Features (PRIMARY features, not extras)
-
-Ambient music during transfers, SSH key generation mini-games, wellness nudges (20-20-20), transfer celebrations, Mission Control dashboard, elastic window detachment, Breeze Landscape, Knowledge Cards, text shimmer/sparkle like Claude Code terminal.
-
-### AI Strategy: Rules Engine (always on) → CoreML on FTDR → Optional LLM (Ollama/Claude API)
-
-### FTDR: Every transfer = immutable record (telecom CDR model). NDJSON, 90-day retention, ~500 bytes/record.
-
----
+$14.99 one-time (Sublime Text model). Students free. Joy features are PRIMARY (music, games, celebrations, wellness). AI: Rules Engine → CoreML → optional LLM. FTDR: telecom CDR model, NDJSON, 90-day retention.
 
 ## MILESTONES
 
-M1 (GUI, Apr 7) → M2 (Function, May 1) → M3 (Performance, Jun 1) → M4 (BreezeFS+CLI, Aug 1) → M5 (Launch, Sep 1)
-
-**Rule:** Never work on M(N+1) while M(N) bugs exist.
-
-M3 depends on: NEON AES acceleration + one-handle architecture fix.
-M4 includes: BreezeFS (zero-dep mount), BreezeRelay (coolbreeze.cloud), BreezeFlow (canvas pipelines), BreezeCLI.
-M5: Product Hunt → HN → Reddit → Twitter benchmark video.
-
----
+M1 (GUI, Apr 7) → M2 (Function, May 1) → M3 (Performance, Jun 1) → M4 (BreezeFS+CLI, Aug 1) → M5 (Launch, Sep 1). Never work on M(N+1) while M(N) bugs exist.
 
 ## VERSIONING
 
-No premature tags. Dev builds by date/commit. 0.1.0-beta.N for milestones. 0.1.0-rc1 = "ਵਖਤ ਦੇ ਪਲਾਂ ਦੀ ਕੈਦ" (locked in). Existing tags stay as history.
-
----
+No premature tags. 0.1.0-beta.N for milestones. 0.1.0-rc1 = "ਵਖਤ ਦੇ ਪਲਾਂ ਦੀ ਕੈਦ" (locked in).
 
 ## COMPETITIVE MOAT
 
-Own SSH engine (libbrz, pure C, zero deps) · BTP dual-channel (SS7 heritage) · BBR adaptive engine · BreezeFS planned (no macFUSE) · FTDR telecom-grade audit · 10 speed techniques (no server agent) · $14.99 one-time.
-
-Competitors: ExpanDrive/Transmit → macFUSE. Cyberduck → Java. All single-channel. None own their SSH engine.
-
----
+Own SSH engine (libbrz) · BTP dual-channel (SS7) · BBR adaptive · BreezeFS (no macFUSE) · FTDR audit · 10 speed techniques · $14.99 one-time. Competitors all use macFUSE/Java/single-channel.
 
 ## SESSION WORKFLOW
 
-Personal Mac + Claude Code = execution. Any Mac + Claude.ai = strategy. Never mix.
-Start: `git pull`. End: `git push`. Claude Code: `AUTONOMOUS MODE. Read CLAUDE.md + Design-Principles.md first.`
+Personal Mac + Claude Code = execution. Any Mac + Claude.ai = strategy. `AUTONOMOUS MODE. Read CLAUDE.md + Design-Principles.md first.`
 
----
-
-## KEY DOCS (in ~/Projects/breeze/Docs/)
+## KEY DOCS (~/Projects/breeze/Docs/)
 
 Protocol-Layered-Architecture.md · BTP-Protocol-Spec.md · Implementation-Roadmap.md · Design-Principles.md · Interaction-Philosophy.md · BREEZE-SPEED-RESEARCH.md · Code-Philosophy.md · Case-Study-AppKit-SwiftUI-Drag-Drop.md · Feature-Registry.md · COMPETITIVE-ANALYSIS.md
 
----
-
-## CONVERSATION THREADS
-
-1. **"Building a next-generation SFTP client"** (ended 2026-03-15) — Sessions 1-13+. Project creation, overnight mega builds (40→1530 tests), GUI polish, themes, QA
-2. **"Breeze SFTP single-pane redesign progress"** (ended 2026-03-17) — P-013 planning, sidebar fixes, Termius competitive analysis
-3. **"Sending remaining mixed up images"** (ended 2026-03-19) — BTP/SS7 deep dive, libbrz creation, crypto vendoring, BrzTransport, shimmer effects, icon design
-4. **"Breeze GUI development approach"** (ended 2026-03-25) — libbrz breakthrough (v1.0.0), KEX debugging, AES-GCM, folder upload, performance analysis, pool architecture
-5. **"Breeze upload performance"** (current) — BBR engine, tune extraction, NEON AES attempt, GCM working, cipher failure API, session 44 prompt
-
----
-
 ## DESIGN INSPIRATION
 
-GUI: Linear, Raycast, Things 3, Arc, Fantastical, Apogee. Colors: Xcode dark theme pastels. Animation: Claude Code shimmer, Swift Student Challenge (FocusFish, Hanafuda). Loading UX: Transmit pattern.
+GUI: Linear, Raycast, Things 3, Arc, Fantastical, Apogee. Colors: Xcode dark theme pastels. Animation: Claude Code shimmer, Swift Student Challenge. Loading UX: Transmit pattern.
 
 ---
 
@@ -249,8 +165,8 @@ GUI: Linear, Raycast, Things 3, Arc, Fantastical, Apogee. Colors: Xcode dark the
 
 | Document | Size | What it answers |
 |----------|------|-----------------|
-| **DEBUGGING-JOURNAL.md** | ~8KB | "What was the root cause of X?" — one line per bug, 40+ entries |
-| **SESSION-LOG.md** | ~5KB | "When did we build X?" — one paragraph per session |
+| **DEBUGGING-JOURNAL.md** | ~9KB | "What was the root cause of X?" — one line per bug, 45+ entries |
+| **SESSION-LOG.md** | ~6KB | "When did we build X?" — one paragraph per session |
 | **DECISIONS-LOG.md** | ~7KB | "Why did we choose X over Y?" — rationale for every architectural decision |
 
 *All four documents live in ~/Projects/breeze-project/. Update after each session.*

@@ -17,7 +17,9 @@
 ### Ciphers
 - **S34 — chacha20-poly1305 send path:** Recv works perfectly, send fails. Exhaustive investigation (S34+) confirmed send path matches IETF draft spec exactly. PARKED — subtle bug remains, needs deeper investigation another day. Key assignment K_1=key[0..31] (main), K_2=key[32..63] (header) confirmed correct
 - **S42 — AES-256-GCM padding:** compute_padding_aead was incorrect for AEAD ciphers (GCM has no separate MAC). Fix applied, GCM encrypts/decrypts correctly end-to-end
-- **S43 — NEON AES disabled:** ARM AESE instruction fuses AddRoundKey+SubBytes (different from x86 AES-NI). Session 43 implementation had round key mismatch — likely applied AESMC on last round, or forgot final rk[14] XOR, or wrong round count (AES-256 = 14 rounds = 15 round keys). Fix pending in Session 44 prompt
+- **S43 — NEON AES disabled:** ARM AESE instruction fuses AddRoundKey+SubBytes (different from x86 AES-NI). Session 43 implementation had round key mismatch — likely applied AESMC on last round, or forgot final rk[14] XOR, or wrong round count (AES-256 = 14 rounds = 15 round keys)
+- **S44 — NEON AES re-enabled and PASSING:** Round keys ARE identical to standard AES — no modification needed. The session 43 bug was confirmed as one of the suspected issues (a/b/c/d/e from diagnosis). 9 gatekeeper tests confirm NEON output matches software byte-for-byte. AES-256-CTR now ~600 MB/s on Apple Silicon
+- **S44 — GCM bottleneck is GHASH, not AES:** With NEON AES, CTR hits 600 MB/s but GCM only 17 MB/s. The bottleneck is software GHASH (polynomial multiply in GF(2^128)). Fix: NEON PMULL carry-less multiply — deferred to session 45
 - **S43 — Error code collision:** BRZ_ESFTP and BRZ_ESFTP_INIT both defined as 30. SSH_FX_FAILURE responses produced misleading "sftp subsystem initialization failed" message. Fix: new codes BRZ_ESFTP_FAILURE=45, BRZ_ESFTP_UNSUPPORTED=46
 
 ### Auth
@@ -43,6 +45,7 @@
 
 ### Performance
 - **S43 — Software GCM vs CTR:** GCM=41.8s, CTR=26s for dmp/ (283 files, 1.05GB). GCM overhead is GHASH polynomial multiply in software. NEON PMULL (carry-less multiply) expected to give 25-50x GHASH speedup
+- **S44 — NEON AES-CTR benchmark:** 600 MB/s on Apple Silicon with hardware NEON. Software was ~40 MB/s. ~15x speedup on raw AES-CTR. GCM still 17 MB/s due to software GHASH bottleneck
 - **S43 — Dynamic cipher scoring:** _rank_ciphers shared helper ranks ciphers by security×performance. AES-256-GCM ranked above CTR when hw acceleration available. Software fallback prefers CTR
 - **S43 — Cipher failure API:** brz_cipher_failure_t records which cipher failed on which server. brz_exclude_cipher prevents re-attempting known-bad ciphers. Persisted in ~/.brz/profiles
 
@@ -56,15 +59,16 @@
 
 ### Sidebar
 - **S13+ — Sidebar text contrast:** `.listStyle(.sidebar)` on macOS applies system vibrancy styling that overrides `foregroundStyle()` with NSColor.labelColor through vibrancy. VisualEffectView compounds it. Partially fixed — readable when selected (black bg, white text), too light when unselected. Needs explicit color override that beats vibrancy
-- **S43e — Sidebar click unresponsive:** Clicks on connection names sometimes don't register. Likely: `.onTapGesture` on parent intercepting before List selection handler, or transparent overlay with `.allowsHitTesting(true)`, or gesture conflict (tap vs drag vs selection). Not yet fixed
+- **S44 — Sidebar click unresponsive FIXED:** Root cause: `.onTapGesture(count: 2)` on connection rows was intercepting single clicks — macOS SwiftUI waits to disambiguate single vs double tap, causing perceived unresponsiveness. Fix: replaced with `.simultaneousGesture` so single-click selection works immediately alongside double-click actions
 
 ### File Browser
 - **S13 — SFTP navigation crash:** "Lost the breeze — File not found: Cannot open directory." Root cause: libssh2 SFTP session handle lost after navigating. The sftpSession handle must persist across multiple list() calls — libssh2_sftp_close_handle should close DIR handle, NOT SFTP session. Fix: NSLock on LibSSH2Session for thread safety
 - **S35 — FTP intercepting SFTP:** FTPTransport was picking up SFTP connections because protocol filter wasn't applied. Fix: explicitly filter FTP out for SFTP connection configs
+- **S44 — File list auto-scroll FIXED:** File list retained scroll position from previous directory when navigating. Fix: `.id(currentPath)` on the List — SwiftUI recreates the view when ID changes, resetting scroll to top
 - **Loading UX:** "Drifting to /path..." with FlowingDotsText takes entire screen, path bounces as length changes, dots animation adds visual noise. Transmit feels faster because it shows tiny spinner in breadcrumb and keeps PREVIOUS listing visible. Fix needed: keep old listing, overlay subtle spinner
 
 ### Transfers
-- **S35+ — Progress shows "Zero KB/s":** Progress callback reports speed=0 — hardcoded in sftp_write_pipelined path. Analytics "Avg Speed: Zero KB/s" reflects this. Fix: calculate bytes_transferred/elapsed_time in progress handler
+- **S44 — Progress "Zero KB/s" FIXED:** Progress callback from libbrz reported speed=0. Fix: fallback calculation in Breeze — `bytesTransferred / elapsed` when callback reports 0. Now shows real speed
 - **S35 — Transfer duration misleading:** Shows wall-clock time from enqueue to completion, not actual transfer time. With 283 files queued serially, each file's "duration" includes wait time for all previous files
 - **S35 — Shimmer log spam:** ~200+ shimmer activations in 3 seconds during welcome screen transition. Every file row triggers shimmer on appear. Not a crash risk but wastes CPU cycles
 

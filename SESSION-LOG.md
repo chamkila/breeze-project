@@ -96,6 +96,9 @@ Dynamic cipher scoring (_rank_ciphers shared helper). AES-256-GCM end-to-end wor
 ### Session 43e
 Atomic sftp_send_packet (memmove + single io.write). BreezeEngineOnly=true confirmed. 651 tests. Session 44 prompt prepared: NEON hardware AES (correct AESE round key schedule) + Breeze UI fixes (sidebar click, Zero KB/s, auto-scroll, file icons).
 
+### Session 44 (2026-03-26)
+NEON AES-256 hardware acceleration re-enabled and passing (9 gatekeeper tests confirm NEON output matches software byte-for-byte). AES-256-CTR now ~600 MB/s on Apple Silicon. AES-256-GCM bottlenecked at ~17 MB/s by software GHASH — NEON PMULL GHASH deferred to next session. Breeze rebuilt with NEON-accelerated libbrz.a (aese/aesmc confirmed in binary via nm). Breeze UI fixes: sidebar click restored (.simultaneousGesture replacing .onTapGesture(count:2)), transfer speed display (fallback calc when callback reports 0), file list auto-scroll (.id(currentPath)), file icons (30+ extensions mapped to semantic SF Symbols with subtle color coding). 660 tests. 15m 49s compute. libbrz: 3ab2573, 8020a2b, 0f52e4d, f15210d. Breeze: e160cc6, 9ad8126, 2ef8cff, ed38076, ecb351a.
+
 ---
 
 *Updated after each session. Add one paragraph, commit breeze-project.*
