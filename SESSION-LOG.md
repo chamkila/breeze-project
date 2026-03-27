@@ -99,6 +99,9 @@ Atomic sftp_send_packet (memmove + single io.write). BreezeEngineOnly=true confi
 ### Session 44 (2026-03-26)
 NEON AES-256 hardware acceleration re-enabled and passing (9 gatekeeper tests confirm NEON output matches software byte-for-byte). AES-256-CTR now ~600 MB/s on Apple Silicon. AES-256-GCM bottlenecked at ~17 MB/s by software GHASH — NEON PMULL GHASH deferred to next session. Breeze rebuilt with NEON-accelerated libbrz.a (aese/aesmc confirmed in binary via nm). Breeze UI fixes: sidebar click restored (.simultaneousGesture replacing .onTapGesture(count:2)), transfer speed display (fallback calc when callback reports 0), file list auto-scroll (.id(currentPath)), file icons (30+ extensions mapped to semantic SF Symbols with subtle color coding). 660 tests. 15m 49s compute. libbrz: 3ab2573, 8020a2b, 0f52e4d, f15210d. Breeze: e160cc6, 9ad8126, 2ef8cff, ed38076, ecb351a.
 
+### Session 45 (2026-03-26)
+THE ARCHITECTURAL FIX. brz_mput enhanced with batch progress callback (brz_batch_progress_cb: file_index, filename, per-file and aggregate bytes/speed), result struct (brz_batch_result_t: succeeded/failed/skipped counts), streaming mkdir with directory cache (creates dirs on bearer SFTP session on-the-fly, 64-entry cache avoids duplicate calls), and error resilience (continues on per-file errors when result struct provided). Breeze wired: BrzTransport.uploadBatch() calls brz_mput in ONE DispatchQueue dispatch. FileBrowserView.uploadDirectory() replaced 283 individual enqueue() calls with 1 brz_mput call. Per-file mkdir phase eliminated — brz_mput handles it. Before: 283 × brz_put → 24 SSH connections → ~200s. After: 1 × brz_mput → 1 SFTP session → target <170s. 8m 4s compute. libbrz: e1a860b, ba6b6a3. Breeze: a7050c1, f66e3c3, 11d10d0/5ef7e25.
+
 ---
 
 *Updated after each session. Add one paragraph, commit breeze-project.*

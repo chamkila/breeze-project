@@ -18,76 +18,77 @@
 - **S34 — chacha20-poly1305 send path:** Recv works perfectly, send fails. Exhaustive investigation (S34+) confirmed send path matches IETF draft spec exactly. PARKED — subtle bug remains, needs deeper investigation another day. Key assignment K_1=key[0..31] (main), K_2=key[32..63] (header) confirmed correct
 - **S42 — AES-256-GCM padding:** compute_padding_aead was incorrect for AEAD ciphers (GCM has no separate MAC). Fix applied, GCM encrypts/decrypts correctly end-to-end
 - **S43 — NEON AES disabled:** ARM AESE instruction fuses AddRoundKey+SubBytes (different from x86 AES-NI). Session 43 implementation had round key mismatch — likely applied AESMC on last round, or forgot final rk[14] XOR, or wrong round count (AES-256 = 14 rounds = 15 round keys)
-- **S44 — NEON AES re-enabled and PASSING:** Round keys ARE identical to standard AES — no modification needed. The session 43 bug was confirmed as one of the suspected issues (a/b/c/d/e from diagnosis). 9 gatekeeper tests confirm NEON output matches software byte-for-byte. AES-256-CTR now ~600 MB/s on Apple Silicon
-- **S44 — GCM bottleneck is GHASH, not AES:** With NEON AES, CTR hits 600 MB/s but GCM only 17 MB/s. The bottleneck is software GHASH (polynomial multiply in GF(2^128)). Fix: NEON PMULL carry-less multiply — deferred to session 45
-- **S43 — Error code collision:** BRZ_ESFTP and BRZ_ESFTP_INIT both defined as 30. SSH_FX_FAILURE responses produced misleading "sftp subsystem initialization failed" message. Fix: new codes BRZ_ESFTP_FAILURE=45, BRZ_ESFTP_UNSUPPORTED=46
+- **S44 — NEON AES re-enabled and PASSING:** Round keys ARE identical to standard AES — no modification needed. 9 gatekeeper tests confirm NEON matches software byte-for-byte. AES-256-CTR now ~600 MB/s on Apple Silicon
+- **S44 — GCM bottleneck is GHASH, not AES:** With NEON AES, CTR hits 600 MB/s but GCM only 17 MB/s. Bottleneck is software GHASH (polynomial multiply in GF(2^128)). Fix: NEON PMULL — deferred
+- **S43 — Error code collision:** BRZ_ESFTP and BRZ_ESFTP_INIT both defined as 30. Fix: new codes BRZ_ESFTP_FAILURE=45, BRZ_ESFTP_UNSUPPORTED=46
 
 ### Auth
 - **S34 — Agent auth hardcoded key type:** brz_ssh_agent_auth hardcoded "ssh-ed25519" for ALL key types. RSA keys need "rsa-sha2-256" algorithm name and SSH_AGENT_RSA_SHA2_256 flag (0x02). Fix: extract key type from agent key blob
 - **S34 — Ed25519 pubkey auth from file:** keyparse returned error 73. Separate issue from agent auth. Agent auth path works and is primary
 
 ### SFTP Operations
-- **S34 — brz_ls returns BRZ_ENET_CLOSED:** sftp_send_packet checks `rc != 4` (expects bytes written), but _brz_ssh_channel_write returns 0 (BRZ_OK). 0 != 4 → false "connection closed" error. SFTP init worked because ssh.c sends FXP_INIT directly via channel_write bypassing sftp_send_packet. Fix: align return value convention
-- **S35 — Folder upload fails:** BrzTransport.mkdir() always called brz_mkdir even when recursive=true. brz_mkdir fails on "directory exists." Fix: call brz_mkdir_p when recursive=true (ignores EEXIST, creates parents)
-- **S35 — handleRemoteMkdir wrong handle:** Was using BTP signaling handle instead of plugin session handle for mkdir operations. Fix: use plugin session (handle #1) first, BTP signaling as fallback
-- **S43e — Packet corruption on concurrent send:** sftp_send_packet built packet in buffer then did multiple io.write calls. Concurrent bearers could interleave. Fix: memmove + single io.write (atomic send)
+- **S34 — brz_ls returns BRZ_ENET_CLOSED:** sftp_send_packet checks `rc != 4` (expects bytes written), but _brz_ssh_channel_write returns 0 (BRZ_OK). 0 != 4 → false "connection closed" error. Fix: align return value convention
+- **S35 — Folder upload fails:** BrzTransport.mkdir() always called brz_mkdir even when recursive=true. Fix: call brz_mkdir_p when recursive=true
+- **S35 — handleRemoteMkdir wrong handle:** Was using BTP signaling handle instead of plugin session handle. Fix: use plugin session first, BTP signaling as fallback
+- **S43e — Packet corruption on concurrent send:** sftp_send_packet built packet in buffer then did multiple io.write calls. Fix: memmove + single io.write (atomic send)
 
 ### Adaptive Engine
-- **S41 — BBR STARTUP window exhaustion:** brz_set_autotune was a stub `(void)b; (void)enabled;`. BBR STARTUP doubled chunk from 32→64→128→256KB uncapped. At 256KB: server window (~262KB) exhausted. Fix: real implementation with tune.enabled flag, checked in tune_sample/tune_adapt
-- **S41 — server_window never propagated to tune:** sftp_session_new() initialized tune.server_window=0. channel.c didn't propagate ssh->channel.remote_window after SFTP init. Ternary `t->server_window ? clamp(...) : BRZ_TUNE_MAX_CHUNK` returned 256KB (uncapped). Fix: propagate remote_window after sftp_session_init succeeds
-- **S41 — OpenSSH initial_window=0:** OpenSSH 9.6 sends initial_window=0 in CHANNEL_OPEN_CONFIRMATION. Real window arrives via WINDOW_ADJUST during subsystem handshake. So server_window is correctly non-zero AFTER sftp_session_init, not before
-- **S41 — 32KB chunk success:** With 32KB chunks, pipeline 8 writes before window exhaustion (~262KB window). With 256KB chunks, one SFTP packet barely fits. 32KB was discovered empirically as the sweet spot
-- **S41 — brz_probe RTT duplication:** bandwidth heuristic and network_class assignment both had hardcoded RTT threshold tables. Fix: single lookup table (rtt_tbl[]) shared by both
+- **S41 — BBR STARTUP window exhaustion:** brz_set_autotune was a stub. BBR doubled chunk to 256KB uncapped. Fix: real implementation with tune.enabled flag
+- **S41 — server_window never propagated to tune:** tune.server_window=0 at init, never set from ssh->channel.remote_window. Fix: propagate after sftp_session_init
+- **S41 — OpenSSH initial_window=0:** Real window arrives via WINDOW_ADJUST during subsystem handshake. server_window is correct AFTER sftp_session_init
+- **S41 — 32KB chunk success:** Pipeline 8 writes before ~262KB window exhaustion. 256KB barely fits. 32KB discovered empirically
+- **S41 — brz_probe RTT duplication:** Fix: single lookup table (rtt_tbl[]) shared by both
 
-### Connection Pool
-- **S35 — Maintenance thread dead code:** maintenance_thread_fn in channel.c was defined but never called — pthread_create was deferred with "unused function" compiler warning. Fix: wire pthread_create in brz_pool_connect when validation_interval_sec > 0. Thread validates idle channels, replaces dead ones, detects abandoned. Shutdown joins thread before freeing
-- **S41 — Per-file SSH overhead:** Each TransferQueue task acquires BTP bearer = new brz_open_ex call (~500ms SSH handshake). 283 files = 283 handshakes. Root cause of slow large folder uploads. Architectural fix needed: BTP should share SFTPDataSource's brz_t* handle (one-handle architecture)
+### Connection Pool / Transfer Architecture
+- **S35 — Maintenance thread dead code:** pthread_create was deferred. Fix: wire it up in brz_pool_connect
+- **S41 — Per-file SSH overhead:** Each TransferQueue task = new brz_open_ex (~500ms). 283 files = 283 handshakes = 12+ seconds wasted
+- **S45 — 24 SSH connections for 283 files FIXED:** Root cause: Breeze called brz_put 283 times individually through TransferQueue, each dispatched separately. brz_mput EXISTED in libbrz but was never called. Fix: BrzTransport.uploadBatch() calls brz_mput ONCE for entire folder. FileBrowserView.uploadDirectory() replaced 283 enqueue() calls with 1 brz_mput call. Per-file mkdir phase eliminated — brz_mput creates dirs on-the-fly with 64-entry directory cache. Before: 24 SSH connections, ~200s. After: 1 SFTP session, target <170s
 
 ### Performance
-- **S43 — Software GCM vs CTR:** GCM=41.8s, CTR=26s for dmp/ (283 files, 1.05GB). GCM overhead is GHASH polynomial multiply in software. NEON PMULL (carry-less multiply) expected to give 25-50x GHASH speedup
-- **S44 — NEON AES-CTR benchmark:** 600 MB/s on Apple Silicon with hardware NEON. Software was ~40 MB/s. ~15x speedup on raw AES-CTR. GCM still 17 MB/s due to software GHASH bottleneck
-- **S43 — Dynamic cipher scoring:** _rank_ciphers shared helper ranks ciphers by security×performance. AES-256-GCM ranked above CTR when hw acceleration available. Software fallback prefers CTR
-- **S43 — Cipher failure API:** brz_cipher_failure_t records which cipher failed on which server. brz_exclude_cipher prevents re-attempting known-bad ciphers. Persisted in ~/.brz/profiles
+- **S43 — Software GCM vs CTR:** GCM=41.8s, CTR=26s for dmp/. GHASH polynomial multiply in software is the bottleneck
+- **S44 — NEON AES-CTR benchmark:** 600 MB/s on Apple Silicon. ~15x speedup over software
+- **S43 — Dynamic cipher scoring:** _rank_ciphers shared helper. GCM > CTR when hw available
+- **S43 — Cipher failure API:** brz_cipher_failure_t per-server. Persisted in ~/.brz/profiles
 
 ---
 
 ## Breeze.app — SwiftUI / AppKit Layer
 
 ### Critical Architecture
-- **S29 — Drag-drop stale closures (THE BREAKTHROUGH):** SwiftUI structs are recreated constantly. Closures captured on structs become stale. Drag-drop events fire from AppKit AFTER SwiftUI recreates the struct → closure points to dead copy. Fix: TransferHandler as @Observable @MainActor final class (reference type). AppKitDropTarget uses Coordinator pattern (Apple's NSViewRepresentable approach). Case study: Docs/Case-Study-AppKit-SwiftUI-Drag-Drop.md
-- **S35 — Beachball on folder upload:** uploadDirectory() blocked MainActor with sequential SFTP mkdir round-trips. 92 directories × round-trip = ~26s frozen UI with no feedback. Fix: Task.detached — walk local tree first (pure filesystem, instant), create remote dirs off MainActor, enqueue all files in batch
+- **S29 — Drag-drop stale closures (THE BREAKTHROUGH):** SwiftUI struct recreation makes closures stale. Fix: TransferHandler as @Observable @MainActor final class
+- **S35 — Beachball on folder upload:** uploadDirectory() blocked MainActor with sequential mkdir. Fix: Task.detached
+- **S45 — Folder upload architecture FIXED:** Replaced 283 individual TransferQueue.enqueue() calls with 1 BrzTransport.uploadBatch() → 1 brz_mput. Eliminated per-file Swift→C boundary crossing, per-file DispatchQueue dispatch, per-file BTP routing decision. Single batch task in transfer panel instead of 283 individual rows
 
 ### Sidebar
-- **S13+ — Sidebar text contrast:** `.listStyle(.sidebar)` on macOS applies system vibrancy styling that overrides `foregroundStyle()` with NSColor.labelColor through vibrancy. VisualEffectView compounds it. Partially fixed — readable when selected (black bg, white text), too light when unselected. Needs explicit color override that beats vibrancy
-- **S44 — Sidebar click unresponsive FIXED:** Root cause: `.onTapGesture(count: 2)` on connection rows was intercepting single clicks — macOS SwiftUI waits to disambiguate single vs double tap, causing perceived unresponsiveness. Fix: replaced with `.simultaneousGesture` so single-click selection works immediately alongside double-click actions
+- **S13+ — Sidebar text contrast:** .listStyle(.sidebar) vibrancy overrides foregroundStyle(). Partially fixed
+- **S44 — Sidebar click unresponsive FIXED:** .onTapGesture(count:2) intercepted single clicks. Fix: .simultaneousGesture
 
 ### File Browser
-- **S13 — SFTP navigation crash:** "Lost the breeze — File not found: Cannot open directory." Root cause: libssh2 SFTP session handle lost after navigating. The sftpSession handle must persist across multiple list() calls — libssh2_sftp_close_handle should close DIR handle, NOT SFTP session. Fix: NSLock on LibSSH2Session for thread safety
-- **S35 — FTP intercepting SFTP:** FTPTransport was picking up SFTP connections because protocol filter wasn't applied. Fix: explicitly filter FTP out for SFTP connection configs
-- **S44 — File list auto-scroll FIXED:** File list retained scroll position from previous directory when navigating. Fix: `.id(currentPath)` on the List — SwiftUI recreates the view when ID changes, resetting scroll to top
-- **Loading UX:** "Drifting to /path..." with FlowingDotsText takes entire screen, path bounces as length changes, dots animation adds visual noise. Transmit feels faster because it shows tiny spinner in breadcrumb and keeps PREVIOUS listing visible. Fix needed: keep old listing, overlay subtle spinner
+- **S13 — SFTP navigation crash:** libssh2 session handle lost. Fix: NSLock on LibSSH2Session
+- **S35 — FTP intercepting SFTP:** Fix: explicitly filter FTP out for SFTP configs
+- **S44 — File list auto-scroll FIXED:** Fix: .id(currentPath)
+- **Loading UX:** "Drifting to..." full-screen takeover. Fix needed: keep old listing, overlay spinner
 
 ### Transfers
-- **S44 — Progress "Zero KB/s" FIXED:** Progress callback from libbrz reported speed=0. Fix: fallback calculation in Breeze — `bytesTransferred / elapsed` when callback reports 0. Now shows real speed
-- **S35 — Transfer duration misleading:** Shows wall-clock time from enqueue to completion, not actual transfer time. With 283 files queued serially, each file's "duration" includes wait time for all previous files
-- **S35 — Shimmer log spam:** ~200+ shimmer activations in 3 seconds during welcome screen transition. Every file row triggers shimmer on appear. Not a crash risk but wastes CPU cycles
+- **S44 — Progress "Zero KB/s" FIXED:** Fix: fallback calc bytesTransferred/elapsed
+- **S35 — Transfer duration misleading:** Wall-clock includes queue wait time
+- **S35 — Shimmer log spam:** ~200+ activations in 3 seconds
 
 ### Themes
-- **S13 — Default theme wrong:** Launches Midnight not Mono. hasSetTheme guard exists but may not fire correctly on fresh install
-- **S21 — Sidebar stays dark on light themes:** Fixed with `.preferredColorScheme(BreezeColors.theme.isDark ? .dark : .light)` on sidebar so .ultraThinMaterial renders correctly
-- **S21 — Theme card selection unclear:** Added 2.5px accent border, checkmark badge (18px circle), unselected at 75% opacity, selected name in accent color
+- **S13 — Default theme wrong:** Launches Midnight not Mono
+- **S21 — Sidebar dark on light themes:** Fix: .preferredColorScheme
+- **S21 — Theme card selection unclear:** Fix: accent border + checkmark badge
 
 ### Status Bar
-- **S35 — Status bar showed "via OpenSSH":** String was hardcoded or read from wrong source. Actual data was flowing through libbrz (confirmed by trace). Fix: read transport name from BTP link manager state
+- **S35 — "via OpenSSH" when using libbrz:** Fix: read from BTP link manager state
 
 ---
 
 ## Build / Tooling
-
-- **S3 — Test crash on first run:** SwiftData models needed ModelContainer in test setup. Test target was missing dependency
-- **S11 — Claude Code permission prompts:** Resolved by using Bash(*) in settings.local.json rather than specific command lists
-- **S17 — Git identity mismatch:** Work Mac commits as `jagjit.singh@singhdigital.ca`, personal Mac as `chamkila@MacBook-Pro-5.local`. Fix: `git config user.name/email` per-repo
-- **S35 — libbrz compiler warning:** maintenance_thread_fn defined but never called. Warning persisted because pthread_create was deferred. Fix: wire it up properly
+- **S3 — Test crash on first run:** SwiftData needed ModelContainer in test setup
+- **S11 — Claude Code permissions:** Fix: Bash(*) in settings.local.json
+- **S17 — Git identity mismatch:** Fix: git config per-repo
+- **S35 — libbrz compiler warning:** maintenance_thread_fn unused. Fix: wire pthread_create
 
 ---
 
