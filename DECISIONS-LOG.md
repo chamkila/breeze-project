@@ -159,7 +159,9 @@ The milk pitcher analogy (j's): "if there is 10 kg of milk, a 100g pitcher is st
 **Why:** File-based, no IPC needed. When connecting to a known server, load last-known BtlBw/RTprop/chunk/depth. Start optimized instead of re-probing. 1-hour TTL. Survives app restarts
 
 ### TD-005: Cipher preference order (runtime, not compile-time)
-**Why:** _rank_ciphers scores each cipher by security×performance considering hardware availability. On Apple Silicon with NEON: GCM > CTR. On software-only: CTR > GCM. Cipher failure API (brz_exclude_cipher) removes known-bad ciphers per-server. No static preference list that works for all cases
+**Why:** `_rank_ciphers` scores each cipher for the AES implementation THIS build runs (`brz_aes_accel_active`: NEON when compiled with the ARMv8 crypto extensions and present, else the table-based software AES; never "what the CPU could do"). The order comes from a real-sshd measurement (checkpoint 7b, libbrz 3f1a6b5, docs/measurements/7b-sftp-exec): software AES (every x86-64 build; libbrz has no AES-NI path) chacha20-poly1305 16.5 > aes128-ctr 7.2 > aes256-ctr 5.9 > aes256-gcm 2.0 MB/s; NEON AES (Apple Silicon) aes256-gcm 214.7 > chacha20-poly1305 156.5 > aes128-ctr 103.0 > aes256-ctr 92.9 MB/s. The scores are a static order until the per-cipher self-benchmark at first use (registry F0237). `brz_exclude_cipher` still removes known-bad ciphers per server.
+
+- **chacha20-poly1305 send:** no defect found. `brz put` and `brz get` verified against OpenSSH 9.6p1 at 32 MB and 128 MB through 260 server-initiated rekeys (checkpoint 7a); the `cipher.c` comment that called it undiagnosed was removed in 3f1a6b5.
 
 ### TD-006: Adaptive connection count for transfers (not hardcoded)
 **When:** Session 44 (decided jointly with AD-013)
@@ -169,7 +171,6 @@ The milk pitcher analogy (j's): "if there is 10 kg of milk, a 100g pitcher is st
 
 ## Decisions NOT YET Made (open questions for future sessions)
 
-- **chacha20-poly1305 send bug:** Root cause unknown despite exhaustive investigation. May need packet capture comparison with OpenSSH
 - **OpenSSH fallback for release:** Re-enable for beta testing? Or ship libbrz-only and fix failures as they come?
 - **QUIC transport (J-59):** Parked. No IETF draft for SSH-over-QUIC. Research when one appears
 - **Test count recovery:** Peak was 1530, current ~503 after transport refactoring. Decide: restore old tests that still apply, or rewrite for current architecture?
